@@ -460,11 +460,16 @@ def plot_alignment(axes, alignment, symbol_plotter, symbols_per_line=50,
     y = 0
     y_start = 0
     line_pos = 0
+    loops_traces = {}
     for i in range(seq_len):
         y = y_start
         for j in range(seq_num):
             bbox = Bbox([[x, y], [x+1, y+1]])
             symbol_plotter.plot_symbol(bbox, alignment, i, j)
+
+            if (trace := alignment.trace)[i, j] != -1 and alignment.sequences[j][trace[i,j]] == 'C':
+                loops_traces[j] = loops_traces.get(j, []) + [bbox.p0[0] + bbox.width / 2]
+
             y += 1
         line_pos += 1
         if line_pos >= symbols_to_print:
@@ -547,6 +552,7 @@ def plot_alignment(axes, alignment, symbol_plotter, symbols_per_line=50,
         axes.xaxis.set_tick_params(
             top=False, bottom=False, labeltop=False, labelbottom=False
         )
+    return loops_traces
 
 
 def plot_alignment_similarity_based(axes, alignment, symbols_per_line=50,
@@ -790,7 +796,7 @@ def plot_alignment_type_based(axes, alignment, symbols_per_line=50,
         axes, alphabet, font_size=symbol_size, font_param=symbol_param,
         color_symbols=color_symbols, color_scheme=color_scheme
     )
-    plot_alignment(
+    return plot_alignment(
         axes=axes, alignment=alignment, symbol_plotter=symbol_plotter,
         symbols_per_line=symbols_per_line,
         show_numbers=show_numbers, number_size=number_size,
