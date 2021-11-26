@@ -351,7 +351,7 @@ class LetterTypePlotter(LetterPlotter):
 def plot_alignment(axes, alignment, symbol_plotter, symbols_per_line=50,
                    show_numbers=False, number_size=None, number_functions=None,
                    labels=None, label_size=None,
-                   show_line_position=False,
+                   show_line_position=False, show_similarity={}, 
                    spacing=1):
     """
     Plot a pairwise or multiple sequence alignment.
@@ -490,6 +490,18 @@ def plot_alignment(axes, alignment, symbol_plotter, symbols_per_line=50,
     number_axes = axes.twinx()
     ticks = []
     tick_labels = []
+    if show_similarity:
+        ticks.append(-0.6)
+        tick_labels.append(show_similarity['label'])
+        y = 0.5
+        refseq = alignment.get_gapped_sequences()[0]
+        for i in range(line_count):
+            for j in range(seq_num):
+                ticks.append(y)
+                tick_labels.append(show_similarity['func'](refseq, alignment.get_gapped_sequences()[j], show_similarity['dict']))
+                y += 1
+            y += spacing
+   
     if show_numbers:
         # Numbers at center height of each line of symbols -> 0.5
         y = 0.5
@@ -690,7 +702,7 @@ def plot_alignment_type_based(axes, alignment, symbols_per_line=50,
                               number_functions=None,
                               labels=None, label_size=None,
                               show_line_position=False,
-                              spacing=1,
+                              spacing=1, show_similarity={},
                               color_scheme=None, color_symbols=False,
                               symbol_size=None, symbol_param=None):
     """
@@ -784,7 +796,7 @@ def plot_alignment_type_based(axes, alignment, symbols_per_line=50,
         number_functions=number_functions,
         labels=labels, label_size=label_size,
         show_line_position=show_line_position,
-        spacing=spacing
+        spacing=spacing, show_similarity=show_similarity
     )
 
 
