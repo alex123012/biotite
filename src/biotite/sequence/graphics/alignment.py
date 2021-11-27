@@ -348,8 +348,9 @@ class LetterTypePlotter(LetterPlotter):
 def plot_alignment(axes, alignment, symbol_plotter, symbols_per_line=50,
                    show_numbers=False, number_size=None, number_functions=None,
                    labels=None, label_size=None,
-                   show_line_position=False, show_similarity={},
-                   spacing=1):
+                   show_line_position=False,
+                   spacing=1, show_similarity=False,
+                   similarity_kwargs={}):
     """
     Plot a pairwise or multiple sequence alignment.
 
@@ -393,6 +394,7 @@ def plot_alignment(axes, alignment, symbol_plotter, symbols_per_line=50,
         a sequence position (*int*) for the respective sequence.
         A ``None`` entry means, that the default numbering is applied
         for the sequence.
+        Can't be used with show_similarity equals to True.
     labels : list of str, optional
         The sequence labels.
         Must be the same size and order as the sequences in the
@@ -405,9 +407,18 @@ def plot_alignment(axes, alignment, symbol_plotter, symbols_per_line=50,
     spacing : float, optional
         The spacing between the alignment lines. 1.0 means that the size
         is equal to the size of a symbol box.
-    symbol_spacing : int, optional
-        А space is placed between each number of elements desired
-        by variable.
+    show_similarity : bool, optional
+        If True similarity_kwargs is used to plot similarity
+        on the right side of the alignment. Can't be used with
+        show_numbers equals to True.
+    similarity_kwargs : dict, optional
+        If show similarity is true is used for plotting similarity.
+        keys to provide:
+            'func': Callable, function to count similarity
+                    (interface - func(x: str, y: str) -> str),
+            'label': str, Label for column name
+            'refseq': str, reference sequence to count alignment
+                      (label or index from alignment)
 
     See also
     --------
@@ -445,16 +456,6 @@ def plot_alignment(axes, alignment, symbol_plotter, symbols_per_line=50,
     if seq_len % symbols_per_line != 0:
         line_count += 1
 
-    if symbol_spacing:
-        spacing_ratio = symbols_per_line / symbol_spacing
-        if spacing_ratio % 1 != 0:
-            raise ValueError("symbols_per_line not multiple of symbol_spacing")
-        # Initializing symbols_to_print to print symbols_per_line
-        # symbols on one line + spacing between symbols
-        symbols_to_print = int(spacing_ratio) + symbols_per_line - 1
-    else:
-        symbols_to_print = symbols_per_line
-
     ### Draw symbols ###
     x = 0
     y = 0
@@ -467,8 +468,10 @@ def plot_alignment(axes, alignment, symbol_plotter, symbols_per_line=50,
             bbox = Bbox([[x, y], [x+1, y+1]])
             symbol_plotter.plot_symbol(bbox, alignment, i, j)
 
-            if (trace := alignment.trace)[i, j] != -1 and alignment.sequences[j][trace[i,j]] == 'C':
-                loops_traces[j] = loops_traces.get(j, []) + [bbox.p0[0] + bbox.width / 2]
+            if ((trace := alignment.trace)[i, j] != -1
+               and alignment.sequences[j][trace[i, j]] == 'C'):
+                loops_traces[j] = (loops_traces.get(j, []) +
+                                   [bbox.p0[0] + bbox.width / 2])
 
             y += 1
         line_pos += 1
@@ -478,10 +481,6 @@ def plot_alignment(axes, alignment, symbol_plotter, symbols_per_line=50,
             y_start += seq_num + spacing
         else:
             x += 1
-            if (symbol_spacing
-               and (i + 1) % symbol_spacing == 0):
-                line_pos += 1
-                x += 1
 
     ### Draw labels ###
     ticks = []
@@ -498,23 +497,30 @@ def plot_alignment(axes, alignment, symbol_plotter, symbols_per_line=50,
     axes.set_yticks(ticks)
     axes.set_yticklabels(tick_labels)
 
-    ### Draw numbers  ###
     # Create twin to allow different tick labels on right side
     number_axes = axes.twinx()
     ticks = []
     tick_labels = []
+
+    ### Draw similarity ###
     if show_similarity:
         ticks.append(-0.6)
-        tick_labels.append(show_similarity['label'])
+        tick_labels.append(similarity_kwargs['label'])
         y = 0.5
-        refseq = alignment.get_gapped_sequences()[0]
+        ind = similarity_kwargs['refseq']
+        ind = ind if isinstance(ind, int) else labels.index(ind)
+        refseq = alignment.get_gapped_sequences()[ind]
         for i in range(line_count):
             for j in range(seq_num):
                 ticks.append(y)
-                tick_labels.append(show_similarity['func'](refseq, alignment.get_gapped_sequences()[j], show_similarity['dict']))
+                tick_labels.append(similarity_kwargs['func'](
+                    refseq,
+                    alignment.get_gapped_sequences()[j]
+                    ))
                 y += 1
             y += spacing
 
+    ### Draw numbers  ###
     if show_numbers:
         # Numbers at center height of each line of symbols -> 0.5
         y = 0.5
@@ -541,7 +547,7 @@ def plot_alignment(axes, alignment, symbol_plotter, symbols_per_line=50,
     number_axes.set_yticks(ticks)
     number_axes.set_yticklabels(tick_labels)
 
-    axes.set_xlim(0, symbols_to_print)
+    axes.set_xlim(0, symbols_per_line)
     # Y-axis starts from top
     lim = seq_num*line_count + spacing*(line_count-1)
     axes.set_ylim(lim, 0)
@@ -574,8 +580,10 @@ def plot_alignment_similarity_based(axes, alignment, symbols_per_line=50,
                                     show_line_position=False,
                                     spacing=1,
                                     color=None, cmap=None, matrix=None,
-                                    color_symbols=False, symbol_spacing=None,
-                                    symbol_size=None, symbol_param=None):
+                                    color_symbols=False,
+                                    symbol_size=None, symbol_param=None,
+                                    similarity_kwargs=None,
+                                    show_similarity=False):
     r"""
     Plot a pairwise or multiple sequence alignment highlighting
     the similarity per alignment column.
@@ -659,9 +667,6 @@ def plot_alignment_similarity_based(axes, alignment, symbols_per_line=50,
     symbol_param : dict
         Additional parameters that is given to the
         :class:`matplotlib.Text` instance of each symbol.
-    symbol_spacing : int, optional
-        А space is placed between each number of elements desired
-        by variable.
 
     See also
     --------
@@ -708,7 +713,8 @@ def plot_alignment_similarity_based(axes, alignment, symbols_per_line=50,
         number_functions=number_functions,
         labels=labels, label_size=label_size,
         show_line_position=show_line_position,
-        spacing=spacing, symbol_spacing=symbol_spacing
+        spacing=spacing, similarity_kwargs=similarity_kwargs,
+        show_similarity=similarity_kwargs
     )
 
 
@@ -717,10 +723,10 @@ def plot_alignment_type_based(axes, alignment, symbols_per_line=50,
                               number_functions=None,
                               labels=None, label_size=None,
                               show_line_position=False,
-                              spacing=1, show_similarity={},
+                              spacing=1,
                               color_scheme=None, color_symbols=False,
                               symbol_size=None, symbol_param=None,
-                              symbol_spacing=None):
+                              similarity_kwargs={}, show_similarity=False):
     """
     Plot a pairwise or multiple sequence alignment coloring each symbol
     based on the symbol type.
@@ -794,9 +800,6 @@ def plot_alignment_type_based(axes, alignment, symbols_per_line=50,
     symbol_param : dict
         Additional parameters that is given to the
         :class:`matplotlib.Text` instance of each symbol.
-    symbol_spacing : int, optional
-        А space is placed between each number of elements desired
-        by variable.
 
     See also
     --------
@@ -815,8 +818,8 @@ def plot_alignment_type_based(axes, alignment, symbols_per_line=50,
         number_functions=number_functions,
         labels=labels, label_size=label_size,
         show_line_position=show_line_position,
-        spacing=spacing, show_similarity=show_similarity
-    )
+        spacing=spacing, similarity_kwargs=similarity_kwargs,
+        show_similarity=show_similarity)
 
 
 def _get_last_valid_index(alignment, column_i, seq_i):
