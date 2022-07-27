@@ -475,7 +475,7 @@ def plot_alignment(axes, alignment, symbol_plotter, symbols_per_line=50,
 
             y += 1
         line_pos += 1
-        if line_pos >= symbols_to_print:
+        if line_pos >= symbols_per_line:
             line_pos = 0
             x = 0
             y_start += seq_num + spacing
