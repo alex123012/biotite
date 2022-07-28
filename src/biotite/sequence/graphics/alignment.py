@@ -740,7 +740,7 @@ def plot_alignment_similarity_based(axes, alignment, symbols_per_line=50,
     )
     if color is not None or cmap is not None:
         symbol_plotter.set_color(color=color, cmap=cmap)
-    plot_alignment(
+    return plot_alignment(
         axes=axes, alignment=alignment, symbol_plotter=symbol_plotter,
         symbols_per_line=symbols_per_line,
         show_numbers=show_numbers, number_size=number_size,
