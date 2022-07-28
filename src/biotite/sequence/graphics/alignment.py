@@ -515,6 +515,7 @@ def plot_alignment(axes, alignment, symbol_plotter, symbols_per_line=50,
     axes.set_yticks(ticks)
     axes.set_yticklabels(tick_labels)
 
+    ### Draw numbers ###
     # Create twin to allow different tick labels on right side
     number_axes = axes.twinx()
     ticks = []
@@ -688,6 +689,18 @@ def plot_alignment_similarity_based(axes, alignment, symbols_per_line=50,
     symbol_spacing : int, optional
         А space is placed between each number of elements desired
         by variable.
+    show_similarity : bool, optional
+        If True similarity_kwargs is used to plot similarity
+        on the right side of the alignment. Can't be used with
+        show_numbers equals to True.
+    similarity_kwargs : dict, optional
+        If show similarity is true is used for plotting similarity.
+        keys to provide:
+            'func': Callable, function to count similarity
+                    (interface - func(x: str, y: str) -> str),
+            'label': str, Label for column name
+            'refseq': str, reference sequence to count alignment
+                      (label or index from alignment)
 
     See also
     --------
@@ -826,6 +839,18 @@ def plot_alignment_type_based(axes, alignment, symbols_per_line=50,
     symbol_spacing : int, optional
         А space is placed between each number of elements desired
         by variable.
+    show_similarity : bool, optional
+        If True similarity_kwargs is used to plot similarity
+        on the right side of the alignment. Can't be used with
+        show_numbers equals to True.
+    similarity_kwargs : dict, optional
+        If show similarity is true is used for plotting similarity.
+        keys to provide:
+            'func': Callable, function to count similarity
+                    (interface - func(x: str, y: str) -> str),
+            'label': str, Label for column name
+            'refseq': str, reference sequence to count alignment
+                      (label or index from alignment)
 
     See also
     --------
