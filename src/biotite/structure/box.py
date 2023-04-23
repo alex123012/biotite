@@ -19,8 +19,9 @@ from numbers import Integral
 import numpy as np
 import numpy.linalg as linalg
 from .util import vector_dot
-from .residues import get_residue_starts
-from .atoms import AtomArray, AtomArrayStack
+from .atoms import repeat
+from .molecules import get_molecule_masks
+from .chains import get_chain_masks, get_chain_starts
 from .error import BadStructureError
 
 
@@ -230,36 +231,18 @@ def repeat_box(atoms, amount=1):
      1 0 1 0 1 0 1 0 1 0 1 0 1 0 1 0 1]
     """
     if atoms.box is None:
-        raise TypeError("Structure has no box")
-    if not isinstance(amount, Integral):
-        raise TypeError("The amount must be an integer")
-    box_count = (1 + 2 * amount) ** 3
-    if isinstance(atoms, AtomArray):
-        repeat_atoms = AtomArray(
-            box_count * atoms.array_length()
-        )
-    elif isinstance(atoms, AtomArrayStack):
-        repeat_atoms = AtomArrayStack(
-            atoms.stack_depth(), box_count * atoms.array_length()
-        )
-    else:
-        raise TypeError("An atom array or stack is required")
-    
-    repeat_atoms.box = atoms.box.copy()
-    if atoms.bonds is not None:
-        repeat_bonds = atoms.bonds.copy()
-        # Repeat the bonds list 'box_count' times
-        for i in range(box_count-1):
-            repeat_bonds += repeat_bonds
-        repeat_atoms.bonds = atoms.repeat_bonds
-    for category in atoms.get_annotation_categories():
-        annot_array = atoms.get_annotation(category)
-        # The atoms have the same annotation in all boxes
-        repeat_atoms.set_annotation(category, np.tile(annot_array, box_count))
+        raise BadStructureError("Structure has no box")
     
     repeat_coord, indices = repeat_box_coord(atoms.coord, atoms.box)
-    repeat_atoms.coord = repeat_coord
-    return repeat_atoms, indices
+    # Unroll repeated coordinates for input to 'repeat()'
+    if repeat_coord.ndim == 2:
+        repeat_coord = repeat_coord.reshape(-1, atoms.array_length(), 3)
+    else: # ndim == 3
+        repeat_coord = repeat_coord.reshape(
+            atoms.stack_depth(), -1, atoms.array_length(), 3
+        )
+        repeat_coord = np.swapaxes(repeat_coord, 0, 1)
+    return repeat(atoms, repeat_coord), indices
 
 
 def repeat_box_coord(coord, box, amount=1):
@@ -286,13 +269,13 @@ def repeat_box_coord(coord, box, amount=1):
 
     Returns
     -------
-    repeated : ndarray, dtype=float, shape=(n,3) or shape=(m,n,3)
-        The repeated coordinates, with the same shape as the input
+    repeated : ndarray, dtype=float, shape=(p,3) or shape=(m,p,3)
+        The repeated coordinates, with the same dimension as the input
         `coord`.
         Includes the original coordinates (central box) in the beginning
         of the array.
-    indices : ndarray, dtype=int, shape=(n,3)
-        Indices to the coordiantes in the original array.
+    indices : ndarray, dtype=int, shape=(p,3)
+        Indices to the coordinates in the original array.
         Equal to
         ``numpy.tile(np.arange(coord.shape[-2]), (1 + 2 * amount) ** 3)``.
     """
@@ -372,38 +355,30 @@ def move_inside_box(coord, box):
 
 def remove_pbc(atoms, selection=None):
     """
-    Remove segmentation caused by periodic boundary conditions from a
-    given structure.
+    Remove segmentation caused by periodic boundary conditions from each
+    molecule in the given structure.
 
-    In this process the first atom (of the selection) is taken as origin
-    and is moved inside the box.
-    All other coordinates are assembled relative to the origin.
+    In this process the centroid of each molecule is moved into the
+    dimensions of the box.
+    To determine the molecules the structure is required to have an
+    associated `BondList`.
+    Otherwise segmentation removal is performed on a per-chain basis.
     
     Parameters
     ----------
-    atoms : AtomArray or AtomArrayStack
+    atoms : AtomArray, shape=(n,) or AtomArrayStack, shape=(m,n)
         The potentially segmented structure.
         The :attr:`box` attribute must be set in the structure.
-    selection : str or (iterable object of) ndarray, dtype=bool, shape=(n,), optional
-        Specifies which part(s) of structure are sanitized, i.e the
+        An associated :attr:`bonds` attribute is recommended.
+    selection : ndarray, dtype=bool, shape=(n,)
+        Specifies which parts of `atoms` are sanitized, i.e the
         segmentation is removed.
-        If a string is given, the value is interpreted as the chain ID
-        to be selected.
-        If a boolean mask is given, the corresponding atoms are
-        selected. 
-        If multiple boolean masks are given, each selection
-        is treated as separate assembly process, independent of all
-        other selections.
-        Consequently, giving multiple boolean masks has the same result
-        as calling the functions multiple times with each mask
-        separately.
-        An atom must not be selected more than one time.
-
     
     Returns
     -------
     sanitized_atoms : AtomArray or AtomArrayStack
-        The input structure with removed periodic boundary conditions.
+        The input structure with removed segmentation over periodic
+        boundaries.
     
     See also
     --------
@@ -411,54 +386,38 @@ def remove_pbc(atoms, selection=None):
 
     Notes
     -----
-    It is not recommended to select regions of the
-    structure with distances from one atom to the next atom that are
-    larger than half of the box size
-    (e.g. the solvent, chain transitions).
-    In this case, multiple selections should be given, with a single
-    molecule selected in each selection.
-
-    Internally the function uses :func:`remove_pbc_from_coord()`.
+    This function ensures that adjacent atoms in the input
+    :class:`AtomArray`/:class:`AtomArrayStack` are spatially close to
+    each other, i.e. their distance to each other is be smaller than the
+    half box size.
     """
+    # Avoid circular import
+    from .geometry import centroid
+    
     if atoms.box is None:
         raise BadStructureError(
             "The 'box' attribute must be set in the structure"
         )
     new_atoms = atoms.copy()
-    
-    if selection is None:
-        new_atoms.coord = remove_pbc_from_coord(
-            atoms.coord, atoms.box
-        )
 
-    elif isinstance(selection, str):
-        # Chain ID
-        selection = (atoms.chain_id == selection)
-        new_atoms.coord[..., selection, :] = remove_pbc_from_coord(
-            atoms.coord[..., selection, :], atoms.box
+    if atoms.bonds is not None:
+        molecule_masks = get_molecule_masks(atoms)
+    else:
+        molecule_masks = get_chain_masks(atoms, get_chain_starts(atoms))
+
+    for mask in molecule_masks:
+        if selection is not None:
+            mask &= selection
+        # Remove segmentation in molecule
+        new_atoms.coord[..., mask, :] = remove_pbc_from_coord(
+            new_atoms.coord[..., mask, :], atoms.box
         )
-    
-    elif isinstance(selection, np.ndarray) and selection.ndim == 1:
-        # Single boolean mask
-        new_atoms.coord[..., selection, :] = remove_pbc_from_coord(
-            atoms.coord[..., selection, :], atoms.box
+        # Put center of molecule into box
+        center = centroid(new_atoms.coord[..., mask, :])[..., np.newaxis, :]
+        center_in_box = move_inside_box(
+            center, new_atoms.box
         )
-    
-    elif isinstance(selection, Iterable):
-        # Iterable of boolean masks
-        selections = np.stack(list(selection))
-        # Test whether an atom was selected multiple times
-        sel_count = np.count_nonzero(selections, axis=0)
-        if (sel_count > 1).any():
-            first_pos = np.where((sel_count > 1))[0][0]
-            raise ValueError(
-                f"Atom at index {first_pos} was selected "
-                f"{sel_count[first_pos]} times"
-            )
-        for selection in selections:
-            new_atoms.coord[..., selection, :] = remove_pbc_from_coord(
-                atoms.coord[..., selection, :], atoms.box
-            )
+        new_atoms.coord[..., mask, :] += (center_in_box - center)
 
     return new_atoms
 

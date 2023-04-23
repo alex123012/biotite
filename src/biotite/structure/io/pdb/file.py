@@ -8,7 +8,7 @@ __all__ = ["PDBFile"]
 
 import warnings
 import numpy as np
-from ...atoms import AtomArray, AtomArrayStack
+from ...atoms import AtomArray, AtomArrayStack, repeat
 from ...bonds import BondList, connect_via_residue_names
 from ...box import vectors_from_unitcell, unitcell_from_vectors
 from ....file import TextFile, InvalidFileError
@@ -19,9 +19,9 @@ from ...filter import (
     filter_highest_occupancy_altloc,
     filter_solvent,
 )
+from ...util import matrix_rotate
 from .hybrid36 import encode_hybrid36, decode_hybrid36, max_hybrid36_number
-import copy
-from warnings import warn
+
 
 # slice objects for readability
 # ATOM/HETATM
@@ -58,6 +58,7 @@ class PDBFile(TextFile):
     This class only provides support for reading/writing the pure atom
     information (*ATOM*, *HETATM*, *MODEL* and *ENDMDL* records). *TER*
     records cannot be written.
+    Additionally, *REMARK* records can be read
     
     See also
     --------
@@ -82,7 +83,66 @@ class PDBFile(TextFile):
         # Pad lines with whitespace if lines are shorter
         # than the required 80 characters
         file.lines = [line.ljust(80) for line in file.lines]
+        file._index_models_and_atoms()
         return file
+    
+
+    def get_remark(self, number):
+        r"""
+        Get the lines containing the *REMARK* records with the given
+        `number`.
+
+        Parameters
+        ----------
+        number : int
+            The *REMARK* number, i.e. the `XXX` in ``REMARK XXX``.
+        
+        Returns
+        -------
+        remark_lines : None or list of str
+            The content of the selected *REMARK* lines.
+            Each line is an element of this list.
+            The ``REMARK XXX `` part of each line is omitted.
+            Furthermore, the first line, which always must be empty, is
+            not included.
+            ``None`` is returned, if the selected *REMARK* records do not
+            exist in the file.
+
+        Examples
+        --------
+
+        >>> import os.path
+        >>> file = PDBFile.read(os.path.join(path_to_structures, "1l2y.pdb"))
+        >>> remarks = file.get_remark(900)
+        >>> print("\n".join(remarks))
+        RELATED ENTRIES                                                      
+        RELATED ID: 5292   RELATED DB: BMRB                                  
+        BMRB 5292 IS CHEMICAL SHIFTS FOR TC5B IN BUFFER AND BUFFER           
+        CONTAINING 30 VOL-% TFE.                                             
+        RELATED ID: 1JRJ   RELATED DB: PDB                                   
+        1JRJ IS AN ANALAGOUS C-TERMINAL STRUCTURE.
+        >>> nonexistent_remark = file.get_remark(999)
+        >>> print(nonexistent_remark)
+        None
+        """
+        CONTENT_START_COLUMN = 11
+
+        # in case a non-integer is accidentally given
+        number = int(number)
+        if number < 0 or number > 999:
+            raise ValueError("The number must be in range 0-999")
+        
+        remark_string = f"REMARK {number:>3d}"
+        # Find lines and omit ``REMARK XXX `` part
+        remark_lines = [
+            line[CONTENT_START_COLUMN:] for line in self.lines
+            if line.startswith(remark_string)
+        ]
+        if len(remark_lines) == 0:
+            return None
+        # Remove first empty line
+        remark_lines = remark_lines[1:]
+        return remark_lines
 
 
     def get_model_count(self):
@@ -94,24 +154,12 @@ class PDBFile(TextFile):
         model_count : int
             The number of models.
         """
-        model_count = 0
-        for line in self.lines:
-            if line.startswith("MODEL"):
-                model_count += 1
-        
-        if model_count == 0:
-            # It could be an empty file or a file with a single model,
-            # where the 'MODEL' line is missing
-            for line in self.lines:
-                if line.startswith(("ATOM", "HETATM")):
-                    return 1
-            return 0
-        else:
-            return model_count
+        return len(self._model_start_i)
     
+
     def get_coord(self, model=None):
         """
-        Get only the coordinates of the PDB file.
+        Get only the coordinates from the PDB file.
         
         Parameters
         ----------
@@ -120,14 +168,14 @@ class PDBFile(TextFile):
             2D coordinate array from the atoms corresponding to the
             given model number (starting at 1).
             Negative values are used to index models starting from the
-            last model insted of the first model.
-            If this parameter is omitted, an 2D coordinate array
+            last model instead of the first model.
+            If this parameter is omitted, an 3D coordinate array
             containing all models will be returned, even if
             the structure contains only one model.
         
         Returns
         -------
-        coord : ndarray, shape=(m,n,3) or shape=(n,2), dtype=float
+        coord : ndarray, shape=(m,n,3) or shape=(n,3), dtype=float
             The coordinates read from the ATOM and HETATM records of the
             file.
         
@@ -183,68 +231,95 @@ class PDBFile(TextFile):
         >>> print(np.allclose(new_stack.coord, atom_array_stack.coord))
         True
         """
-        # Line indices where a new model starts
-        model_start_i = np.array([i for i in range(len(self.lines))
-                                  if self.lines[i].startswith("MODEL")],
-                                 dtype=int)
-        # Line indices with ATOM or HETATM records
-        atom_line_i = np.array([i for i in range(len(self.lines)) if
-                                self.lines[i].startswith(("ATOM", "HETATM"))],
-                                dtype=int)
-        # Structures containing only one model may omit MODEL record
-        # In these cases model starting index is set to 0
-        if len(model_start_i) == 0:
-            model_start_i = np.array([0])
-        
         if model is None:
-            depth = len(model_start_i)
-            length = self._get_model_length(model_start_i, atom_line_i)
-            coord_i = atom_line_i
-        
-        else:
-            last_model = len(model_start_i)
-            if model == 0:
-                raise ValueError("The model index must not be 0")
-            # Negative models mean index starting from last model
-            model = last_model + model + 1 if model < 0 else model
-
-            if model < last_model:
-                line_filter = ( ( atom_line_i >= model_start_i[model-1] ) &
-                                ( atom_line_i <  model_start_i[model  ] ) )
-            elif model == last_model:
-                line_filter = (atom_line_i >= model_start_i[model-1])
-            else:
-                raise ValueError(
-                    f"The file has {last_model} models, "
-                    f"the given model {model} does not exist"
-                )
-            coord_i = atom_line_i[line_filter]
-            length = len(coord_i)
-        
-        # Fill in coordinates
-        if model is None:
-            coord = np.zeros((depth, length, 3), dtype=np.float32)
+            coord = np.zeros(
+                (len(self._model_start_i), self._get_model_length(), 3),
+                dtype=np.float32
+            )
             m = 0
             i = 0
-            for line_i in atom_line_i:
-                if m < len(model_start_i)-1 and line_i > model_start_i[m+1]:
+            for line_i in self._atom_line_i:
+                if (
+                    m < len(self._model_start_i)-1
+                    and line_i > self._model_start_i[m+1]
+                ):
                     m += 1
                     i = 0
                 line = self.lines[line_i]
-                coord[m,i,0] = float(line[30:38])
-                coord[m,i,1] = float(line[38:46])
-                coord[m,i,2] = float(line[46:54])
+                coord[m,i,0] = float(line[_coord_x])
+                coord[m,i,1] = float(line[_coord_y])
+                coord[m,i,2] = float(line[_coord_z])
                 i += 1
             return coord
         
         else:
-            coord = np.zeros((length, 3), dtype=np.float32)
+            coord_i = self._get_atom_record_indices_for_model(model)
+            coord = np.zeros((len(coord_i), 3), dtype=np.float32)
             for i, line_i in enumerate(coord_i):
                 line = self.lines[line_i]
-                coord[i,0] = float(line[30:38])
-                coord[i,1] = float(line[38:46])
-                coord[i,2] = float(line[46:54])
+                coord[i,0] = float(line[_coord_x])
+                coord[i,1] = float(line[_coord_y])
+                coord[i,2] = float(line[_coord_z])
             return coord
+    
+
+    def get_b_factor(self, model=None):
+        """
+        Get only the B-factors from the PDB file.
+        
+        Parameters
+        ----------
+        model : int, optional
+            If this parameter is given, the function will return a
+            1D B-factor array from the atoms corresponding to the
+            given model number (starting at 1).
+            Negative values are used to index models starting from the
+            last model instead of the first model.
+            If this parameter is omitted, an 2D B-factor array
+            containing all models will be returned, even if
+            the structure contains only one model.
+        
+        Returns
+        -------
+        b_factor : ndarray, shape=(m,n) or shape=(n,), dtype=float
+            The B-factors read from the ATOM and HETATM records of the
+            file.
+        
+        Notes
+        -----
+        Note that :func:`get_b_factor()` may output more B-factors
+        than the atom array (stack) from the corresponding
+        :func:`get_structure()` call has atoms.
+        The reason for this is, that :func:`get_structure()` filters
+        *altloc* IDs, while `get_b_factor()` does not.
+        """
+        if model is None:
+            b_factor = np.zeros(
+                (len(self._model_start_i), self._get_model_length()),
+                dtype=np.float32
+            )
+            m = 0
+            i = 0
+            for line_i in self._atom_line_i:
+                if (
+                    m < len(self._model_start_i)-1
+                    and line_i > self._model_start_i[m+1]
+                ):
+                    m += 1
+                    i = 0
+                line = self.lines[line_i]
+                b_factor[m,i] = float(line[_temp_f])
+                i += 1
+            return b_factor
+        
+        else:
+            b_factor_i = self._get_atom_record_indices_for_model(model)
+            b_factor = np.zeros(len(b_factor_i), dtype=np.float32)
+            for i, line_i in enumerate(b_factor_i):
+                line = self.lines[line_i]
+                b_factor[i] = float(line[_temp_f])
+            return b_factor
+
 
     def get_structure(self, model=None, altloc="first", extra_fields=[],
                       include_bonds=False):
@@ -261,7 +336,7 @@ class PDBFile(TextFile):
             :class:`AtomArray` from the atoms corresponding to the given
             model number (starting at 1).
             Negative values are used to index models starting from the
-            last model insted of the first model.
+            last model instead of the first model.
             If this parameter is omitted, an :class:`AtomArrayStack`
             containing all models will be returned, even if the
             structure contains only one model.
@@ -293,51 +368,18 @@ class PDBFile(TextFile):
         array : AtomArray or AtomArrayStack
             The return type depends on the `model` parameter.
         """
-        # Line indices where a new model starts
-        model_start_i = np.array([i for i in range(len(self.lines))
-                                  if self.lines[i].startswith(("MODEL"))],
-                                 dtype=int)
-        # Line indices with ATOM or HETATM records
-        atom_line_i = np.array([i for i in range(len(self.lines)) if
-                                self.lines[i].startswith(("ATOM", "HETATM"))],
-                               dtype=int)
-        # Structures containing only one model may omit MODEL record
-        # In these cases model starting index is set to 0
-        if len(model_start_i) == 0:
-            model_start_i = np.array([0])
-        
         if model is None:
-            depth = len(model_start_i)
-            length = self._get_model_length(model_start_i, atom_line_i)
+            depth = len(self._model_start_i)
+            length = self._get_model_length()
             array = AtomArrayStack(depth, length)
-            # Line indices for annotation determination
-            # Annotation is determined from model 1,
-            # therefore from ATOM records before second MODEL record
-            if len(model_start_i) == 1:
-                annot_i = atom_line_i
-            else:
-                annot_i = atom_line_i[atom_line_i < model_start_i[1]]
-            # Line indices for coordinate determination
-            coord_i = atom_line_i
+            # Record indices for annotation determination
+            # Annotation is determined from model 1
+            annot_i = self._get_atom_record_indices_for_model(1)
+            # Record indices for coordinate determination
+            coord_i = self._atom_line_i
         
         else:
-            last_model = len(model_start_i)
-            if model == 0:
-                raise ValueError("The model index must not be 0")
-            # Negative models mean index starting from last model
-            model = last_model + model + 1 if model < 0 else model
-
-            if model < last_model:
-                line_filter = ( ( atom_line_i >= model_start_i[model-1] ) &
-                                ( atom_line_i <  model_start_i[model  ] ) )
-            elif model == last_model:
-                line_filter = (atom_line_i >= model_start_i[model-1])
-            else:
-                raise ValueError(
-                    f"The file has {last_model} models, "
-                    f"the given model {model} does not exist"
-                )
-            annot_i = coord_i = atom_line_i[line_filter]
+            annot_i = coord_i = self._get_atom_record_indices_for_model(model)
             array = AtomArray(len(coord_i))
         
         # Create mandatory and optional annotation arrays
@@ -358,7 +400,7 @@ class PDBFile(TextFile):
         # i is index in array, line_i is line index
         for i, line_i in enumerate(annot_i):
             line = self.lines[line_i]
-            chain_id[i] = line[_chain_id].upper().strip()
+            chain_id[i] = line[_chain_id].strip()
             res_id[i] = decode_hybrid36(line[_res_id])
             ins_code[i] = line[_ins_code].strip()
             res_name[i] = line[_res_name].strip()
@@ -367,7 +409,11 @@ class PDBFile(TextFile):
             element[i] = line[_element].strip()
             altloc_id[i] = line[_alt_loc]
             atom_id_raw[i] = line[_atom_id]
-            charge_raw[i] = line[_charge][::-1]  # turn "1-" into "-1"
+            # turn "1-" into "-1", if necessary
+            if line[_charge][0] in "+-":
+                charge_raw[i] = line[_charge]
+            else:
+                charge_raw[i] = line[_charge][::-1] 
             occupancy[i] = float(line[_occupancy].strip())
             b_factor[i] = float(line[_temp_f].strip())
         
@@ -416,7 +462,9 @@ class PDBFile(TextFile):
                     atom_name = array.atom_name[idx]
                     array.element[idx] = guess_element(atom_name)
                     rep_num += 1
-            warn("{} elements were guessed from atom_name.".format(rep_num))
+            warnings.warn(
+                "{} elements were guessed from atom_name.".format(rep_num)
+            )
         
         # Fill in coordinates
         if isinstance(array, AtomArray):
@@ -429,8 +477,8 @@ class PDBFile(TextFile):
         elif isinstance(array, AtomArrayStack):
             m = 0
             i = 0
-            for line_i in atom_line_i:
-                if m < len(model_start_i)-1 and line_i > model_start_i[m+1]:
+            for line_i in self._atom_line_i:
+                if m < len(self._model_start_i)-1 and line_i > self._model_start_i[m+1]:
                     m += 1
                     i = 0
                 line = self.lines[line_i]
@@ -500,6 +548,7 @@ class PDBFile(TextFile):
         
         return array
 
+
     def set_structure(self, array, hybrid36=False):
         """
         Set the :class:`AtomArray` or :class:`AtomArrayStack` for the
@@ -559,9 +608,9 @@ class PDBFile(TextFile):
         else:
             max_atoms, max_residues = 99999, 9999
         if array.array_length() > max_atoms:
-            warn(f"More then {max_atoms:,} atoms per model")
+            warnings.warn(f"More then {max_atoms:,} atoms per model")
         if (array.res_id > max_residues).any():
-            warn(f"Residue IDs exceed {max_residues:,}")
+            warnings.warn(f"Residue IDs exceed {max_residues:,}")
         if np.isnan(array.coord).any():
             raise ValueError("Coordinates contain 'NaN' values")
         if any([len(name) > 1 for name in array.chain_id]):
@@ -632,7 +681,7 @@ class PDBFile(TextFile):
             self.lines.append(
                 f"CRYST1{a:>9.3f}{b:>9.3f}{c:>9.3f}"
                 f"{np.rad2deg(alpha):>7.2f}{np.rad2deg(beta):>7.2f}"
-                f"{np.rad2deg(gamma):>7.2f} P 1           1"
+                f"{np.rad2deg(gamma):>7.2f} P 1           1          "
             )
         is_stack = coords.shape[0] > 1
         for model_num, coord_i in enumerate(coords, start=1):
@@ -662,22 +711,354 @@ class PDBFile(TextFile):
                 (array.chain_id[bond_array[:,0]] != array.chain_id[bond_array[:,1]])
             ]
             self._set_bonds(
-                BondList(array.array_length(), bond_array), atom_id
+                BondList(array.array_length(), bond_array), pdb_atom_id
             )
+        
+        self._index_models_and_atoms()
+    
 
-    def _get_model_length(self, model_start_i, atom_line_i):
+    def list_assemblies(self):
+        """
+        List the biological assemblies that are available for the
+        structure in the given file.
+
+        This function receives the data from the ``REMARK 300`` records
+        in the file.
+        Consequently, this remark must be present in the file.
+
+        Returns
+        -------
+        assemblies : list of str
+            A list that contains the available assembly IDs.
+        
+        Examples
+        --------
+        >>> import os.path
+        >>> file = PDBFile.read(os.path.join(path_to_structures, "1f2n.pdb"))
+        >>> print(file.list_assemblies())
+        ['1']
+        """
+        # Get remarks listing available assemblies
+        remark_lines = self.get_remark(300)
+        if remark_lines is None:
+            raise InvalidFileError(
+                "File does not contain assembly information (REMARK 300)"
+            )
+        return [
+            assembly_id.strip() 
+            for assembly_id in remark_lines[0][12:].split(",")
+        ]
+        
+    
+    def get_assembly(self, assembly_id=None, model=None, altloc="first",
+                     extra_fields=[], include_bonds=False):
+        """
+        Build the given biological assembly.
+
+        This function receives the data from ``REMARK 350`` records in
+        the file.
+        Consequently, this remark must be present in the file.
+
+        Parameters
+        ----------
+        assembly_id : str
+            The assembly to build.
+            Available assembly IDs can be obtained via
+            :func:`list_assemblies()`.
+        model : int, optional
+            If this parameter is given, the function will return an
+            :class:`AtomArray` from the atoms corresponding to the given
+            model number (starting at 1).
+            Negative values are used to index models starting from the
+            last model instead of the first model.
+            If this parameter is omitted, an :class:`AtomArrayStack`
+            containing all models will be returned, even if the
+            structure contains only one model.
+        altloc : {'first', 'occupancy', 'all'}
+            This parameter defines how *altloc* IDs are handled:
+                - ``'first'`` - Use atoms that have the first
+                  *altloc* ID appearing in a residue.
+                - ``'occupancy'`` - Use atoms that have the *altloc* ID
+                  with the highest occupancy for a residue.
+                - ``'all'`` - Use all atoms.
+                  Note that this leads to duplicate atoms.
+                  When this option is chosen, the ``altloc_id``
+                  annotation array is added to the returned structure.
+        extra_fields : list of str, optional
+            The strings in the list are optional annotation categories
+            that should be stored in the output array or stack.
+            These are valid values:
+            ``'atom_id'``, ``'b_factor'``, ``'occupancy'`` and
+            ``'charge'``.
+        include_bonds : bool, optional
+            If set to true, a :class:`BondList` will be created for the
+            resulting :class:`AtomArray` containing the bond information
+            from the file.
+            All bonds have :attr:`BondType.ANY`, since the PDB format
+            does not support bond orders.
+
+        Returns
+        -------
+        assembly : AtomArray or AtomArrayStack
+            The assembly.
+            The return type depends on the `model` parameter.
+        
+        Examples
+        --------
+
+        >>> import os.path
+        >>> file = PDBFile.read(os.path.join(path_to_structures, "1f2n.pdb"))
+        >>> assembly = file.get_assembly(model=1)
+        """
+        # Get base structure
+        structure = self.get_structure(
+            model,
+            altloc,
+            extra_fields,
+            include_bonds,
+        )
+
+        # Get lines containing transformations for chosen assembly
+        remark_lines = self.get_remark(350)
+        if remark_lines is None:
+            raise InvalidFileError(
+                "File does not contain assembly information (REMARK 350)"
+            )
+        # Get lines corresponding to selected assembly ID
+        assembly_start_i = None
+        assembly_stop_i = None
+        for i, line in enumerate(remark_lines):
+            if line.startswith("BIOMOLECULE"):
+                current_assembly_id = line[12:].strip()
+                if assembly_start_i is not None:
+                    # Start was already found -> this is the next entry
+                    # -> this is the stop
+                    assembly_stop_i = i
+                    break
+                if current_assembly_id == assembly_id or assembly_id is None:
+                    assembly_start_i = i
+        # In case of the final assembly of the file,
+        # the 'stop' is the end of REMARK 350 lines
+        assembly_stop_i = len(remark_lines) if assembly_stop_i is None else i
+        if assembly_start_i is None:
+            if assembly_id is None:
+                raise InvalidFileError(
+                    "File does not contain transformation "
+                    "expressions for assemblies"
+                )
+            else:
+                raise KeyError(
+                    f"The assembly ID '{assembly_id}' is not found"
+                )
+        assembly_lines = remark_lines[assembly_start_i : assembly_stop_i]
+
+        # Get transformations for a set of chains
+        chain_set_start_indices = [
+            i for i, line in enumerate(assembly_lines)
+            if line.startswith("APPLY THE FOLLOWING TO CHAINS")
+        ]
+        # Add exclusive stop at end of records
+        chain_set_start_indices.append(len(assembly_lines))
+        assembly = None
+        for i in range(len(chain_set_start_indices) - 1):
+            start = chain_set_start_indices[i]
+            stop = chain_set_start_indices[i+1]
+            # Read affected chain IDs from the following line(s)
+            affected_chain_ids = []
+            transform_start = None
+            for j, line in enumerate(assembly_lines[start : stop]):
+                if line.startswith("APPLY THE FOLLOWING TO CHAINS:") or \
+                   line.startswith("                   AND CHAINS:"):
+                        affected_chain_ids += [
+                            chain_id.strip() 
+                            for chain_id in line[30:].split(",")
+                        ]
+                else:
+                    # Chain specification has finished
+                    # BIOMT lines start directly after chain specification
+                    transform_start = start + j
+                    break
+            # Parse transformations from BIOMT lines
+            if transform_start is None:
+                raise InvalidFileError(
+                    "No 'BIOMT' records found for chosen assembly"
+                )
+            rotations, translations = _parse_transformations(
+                assembly_lines[transform_start : stop]
+            )
+            # Filter affected chains
+            sub_structure = structure[
+                ..., np.isin(structure.chain_id, affected_chain_ids)
+            ]
+            sub_assembly = _apply_transformations(
+                sub_structure, rotations, translations
+            )
+            # Merge the chains with IDs for this transformation
+            # with chains from other transformations
+            if assembly is None:
+                assembly = sub_assembly
+            else:
+                assembly += sub_assembly
+
+        return assembly
+    
+
+    def get_symmetry_mates(self, model=None, altloc="first",
+                           extra_fields=[], include_bonds=False):
+        """
+        Build a structure model containing all symmetric copies
+        of the structure within a single unit cell, given by the space
+        group.
+
+        This function receives the data from ``REMARK 290`` records in
+        the file.
+        Consequently, this remark must be present in the file, which is
+        usually only true for crystal structures.
+
+        Parameters
+        ----------
+        model : int, optional
+            If this parameter is given, the function will return an
+            :class:`AtomArray` from the atoms corresponding to the given
+            model number (starting at 1).
+            Negative values are used to index models starting from the
+            last model instead of the first model.
+            If this parameter is omitted, an :class:`AtomArrayStack`
+            containing all models will be returned, even if the
+            structure contains only one model.
+        altloc : {'first', 'occupancy', 'all'}
+            This parameter defines how *altloc* IDs are handled:
+                - ``'first'`` - Use atoms that have the first
+                  *altloc* ID appearing in a residue.
+                - ``'occupancy'`` - Use atoms that have the *altloc* ID
+                  with the highest occupancy for a residue.
+                - ``'all'`` - Use all atoms.
+                  Note that this leads to duplicate atoms.
+                  When this option is chosen, the ``altloc_id``
+                  annotation array is added to the returned structure.
+        extra_fields : list of str, optional
+            The strings in the list are optional annotation categories
+            that should be stored in the output array or stack.
+            These are valid values:
+            ``'atom_id'``, ``'b_factor'``, ``'occupancy'`` and
+            ``'charge'``.
+        include_bonds : bool, optional
+            If set to true, a :class:`BondList` will be created for the
+            resulting :class:`AtomArray` containing the bond information
+            from the file.
+            All bonds have :attr:`BondType.ANY`, since the PDB format
+            does not support bond orders.
+
+        Returns
+        -------
+        symmetry_mates : AtomArray or AtomArrayStack
+            All atoms within a single unit cell.
+            The return type depends on the `model` parameter.
+        
+        Notes
+        -----
+        To expand the structure beyond a single unit cell, use
+        :func:`repeat_box()` with the return value as its
+        input.
+        
+        Examples
+        --------
+
+        >>> import os.path
+        >>> file = PDBFile.read(os.path.join(path_to_structures, "1aki.pdb"))
+        >>> atoms_in_unit_cell = file.get_symmetry_mates(model=1)
+        """
+        # Get base structure
+        structure = self.get_structure(
+            model,
+            altloc,
+            extra_fields,
+            include_bonds,
+        )
+        # Get lines containing transformations for crystallographic symmetry
+        remark_lines = self.get_remark(290)
+        if remark_lines is None:
+            raise InvalidFileError(
+                "File does not contain crystallographic symmetry "
+                "information (REMARK 350)"
+            )
+        transform_lines = [
+            line for line in remark_lines if line.startswith("  SMTRY")
+        ]
+        rotations, translations = _parse_transformations(
+            transform_lines
+        )
+        return _apply_transformations(
+            structure, rotations, translations
+        )
+    
+
+
+
+    def _index_models_and_atoms(self):
+        # Line indices where a new model starts
+        self._model_start_i = np.array(
+            [
+                i for i in range(len(self.lines))
+                if self.lines[i].startswith(("MODEL"))
+            ],
+            dtype=int
+        )
+        if len(self._model_start_i) == 0:
+            # It could be an empty file or a file with a single model,
+            # where the 'MODEL' line is missing
+            for line in self.lines:
+                if line.startswith(("ATOM", "HETATM")):
+                    # Single model
+                    self._model_start_i = np.array([0])
+                    break
+        
+        # Line indices with ATOM or HETATM records
+        self._atom_line_i = np.array(
+            [
+                i for i in range(len(self.lines))
+                if self.lines[i].startswith(("ATOM", "HETATM"))
+            ],
+            dtype=int
+        )
+
+
+    def _get_atom_record_indices_for_model(self, model):
+        last_model = len(self._model_start_i)
+        if model == 0:
+            raise ValueError("The model index must not be 0")
+        # Negative models mean index starting from last model
+        model = last_model + model + 1 if model < 0 else model
+
+        if model < last_model:
+            line_filter = (
+                (self._atom_line_i >= self._model_start_i[model-1]) &
+                (self._atom_line_i <  self._model_start_i[model  ])
+            )
+        elif model == last_model:
+            line_filter = (self._atom_line_i >= self._model_start_i[model-1])
+        else:
+            raise ValueError(
+                f"The file has {last_model} models, "
+                f"the given model {model} does not exist"
+            )
+        return self._atom_line_i[line_filter]
+
+
+    def _get_model_length(self):
         """
         Determine length of models and check that all models
         have equal length.
         """
-        n_models = len(model_start_i)
+        n_models = len(self._model_start_i)
         length = None
-        for model_i in range(len(model_start_i)):
-            model_start = model_start_i[model_i]
-            model_stop = model_start_i[model_i+1] if model_i+1 < n_models \
-                            else len(self.lines)
+        for model_i in range(len(self._model_start_i)):
+            model_start = self._model_start_i[model_i]
+            model_stop = self._model_start_i[model_i+1] \
+                         if model_i+1 < n_models else len(self.lines)
             model_length = np.count_nonzero(
-                (atom_line_i >= model_start) & (atom_line_i < model_stop)
+                (self._atom_line_i >= model_start) &
+                (self._atom_line_i < model_stop)
             )
             if length is None:
                 length = model_length
@@ -687,6 +1068,7 @@ class PDBFile(TextFile):
                     f"but model 1 has {length} atoms, must be equal"
                 )
         return length
+
 
     def _get_bonds(self, atom_ids):
         conect_lines = [line for line in self.lines
@@ -704,11 +1086,11 @@ class PDBFile(TextFile):
 
         bonds = []
         for line in conect_lines:
-            center_id = atom_id_to_index[int(line[6 : 11])]
+            center_id = atom_id_to_index[decode_hybrid36(line[6 : 11])]
             for i in range(11, 31, 5):
                 id_string = line[i : i+5]
                 try:
-                    id = atom_id_to_index[int(id_string)]
+                    id = atom_id_to_index[decode_hybrid36(id_string)]
                 except ValueError:
                     # String is empty -> no further IDs
                     break
@@ -717,6 +1099,7 @@ class PDBFile(TextFile):
         # The length of the 'atom_ids' array
         # is equal to the length of the AtomArray
         return BondList(len(atom_ids), np.array(bonds, dtype=np.uint32))
+
 
     def _set_bonds(self, bond_list, atom_ids):
         # Bond type is unused since PDB does not support bond orders
@@ -730,8 +1113,8 @@ class PDBFile(TextFile):
                     break
                 if n_added == 0:
                     # Add new record
-                    line = f"CONECT{atom_ids[center_i]:>5d}"
-                line += f"{atom_ids[bonded_i]:>5d}"
+                    line = f"CONECT{atom_ids[center_i]:>5}"
+                line += f"{atom_ids[bonded_i]:>5}"
                 n_added += 1
                 if n_added == 4:
                     # Only a maximum of 4 bond partners can be put
@@ -741,3 +1124,60 @@ class PDBFile(TextFile):
                     self.lines.append(line)
             if n_added > 0:
                 self.lines.append(line)
+
+
+def _parse_transformations(lines):
+    """
+    Parse the rotation and translation transformations from
+    *REMARK* 290 or 350.
+    Return as array of matrices and vectors respectively
+    """
+    # Each transformation requires 3 lines for the (x,y,z) components
+    if len(lines) % 3 != 0:
+        raise InvalidFileError("Invalid number of transformation vectors")
+    n_transformations = len(lines) // 3
+
+    rotations = np.zeros((n_transformations, 3, 3), dtype=float)
+    translations = np.zeros((n_transformations, 3), dtype=float)
+
+    transformation_i = 0
+    component_i = 0
+    for line in lines:
+        # The first two elements (component and
+        # transformation index) are not used
+        transformations = [float(e) for e in line.split()[2:]]
+        if len(transformations) != 4:
+            raise InvalidFileError(
+                "Invalid number of transformation vector elements"
+            )
+        rotations[transformation_i, component_i, :] = transformations[:3]
+        translations[transformation_i, component_i] = transformations[3]
+
+        component_i += 1
+        if component_i == 3:
+            # All (x,y,z) components were parsed
+            # -> head to the next transformation 
+            transformation_i += 1
+            component_i = 0
+    
+    return rotations, translations
+
+
+def _apply_transformations(structure, rotations, translations):
+    """
+    Get subassembly by applying the given transformations to the input
+    structure containing affected chains.
+    """
+    # Additional first dimension for 'structure.repeat()'
+    assembly_coord = np.zeros((len(rotations),) + structure.coord.shape)
+
+    # Apply corresponding transformation for each copy in the assembly
+    for i, (rotation, translation) in enumerate(zip(rotations, translations)):
+        coord = structure.coord
+        # Rotate
+        coord = matrix_rotate(coord, rotation)
+        # Translate
+        coord += translation
+        assembly_coord[i] = coord
+
+    return repeat(structure, assembly_coord)

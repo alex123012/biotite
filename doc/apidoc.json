@@ -48,6 +48,13 @@
             "MotifQuery",
             "StructureQuery"
         ],
+        "Sorting and grouping" : [
+            "Sorting",
+            "Grouping",
+            "DepositGrouping",
+            "IdentityGrouping",
+            "UniprotGrouping"
+        ],
         "Search and fetch" : [
             "count",
             "search",
@@ -66,7 +73,8 @@
             "Alphabet",
             "LetterAlphabet",
             "AlphabetMapper",
-            "AlphabetError"
+            "AlphabetError",
+            "common_alphabet"
         ],
         "Sequence features" : [
             "Feature",
@@ -209,9 +217,16 @@
             "superimpose_apply"
         ],
         "Filters" : [
+            "filter_canonical_nucleotides",
             "filter_nucleotides",
+            "filter_canonical_amino_acids",
             "filter_amino_acids",
+            "filter_carbohydrates",
             "filter_backbone",
+            "filter_peptide_backbone",
+            "filter_phosphate_backbone",
+            "filter_linear_bond_continuity",
+            "filter_polymer",
             "filter_solvent",
             "filter_monoatomic_ions",
             "filter_intersection",
@@ -219,11 +234,13 @@
             "filter_highest_occupancy_altloc"
         ],
         "Checks" : [
-            "check_bond_continuity",
             "check_id_continuity",
             "check_atom_id_continuity",
             "check_res_id_continuity",
-            "check_duplicate_atoms"
+            "check_backbone_continuity",
+            "check_duplicate_atoms",
+            "check_bond_continuity",
+            "check_linear_continuity"
         ],
         "Residue level utility" : [
             "get_residue_starts",
@@ -256,6 +273,7 @@
         "Structure comparison" : [
             "average",
             "rmsd",
+	    "rmspd",
             "rmsf"
         ],
         "General analysis" : [

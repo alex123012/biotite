@@ -116,20 +116,17 @@ def test_pdbx_consistency(path, model):
     # (all vector elements = {0, 1})
     if a2.box is not None and not ((a2.box == 0) | (a2.box == 1)).all():
         assert np.allclose(a1.box, a2.box)
+    assert a2.hetero is not None
     # MMTF might assign some residues, that PDBx assigns as 'hetero',
     # as 'non-hetero' if they are RNA/DNA or peptide linking
-    try:
-        assert a1.hetero.tolist() == \
-               a2.hetero.tolist()
-    except AssertionError:
-        conflict_residues = np.unique(
-            a1.res_name[a1.hetero != a2.hetero]
-        )
-        for res in conflict_residues:
-            assert info.link_type(res) in [
-                "L-PEPTIDE LINKING", "PEPTIDE LINKING",
-                "DNA LINKING", "RNA LINKING"
-            ]
+    conflict_residues = np.unique(
+        a1.res_name[a1.hetero != a2.hetero]
+    )
+    for res in conflict_residues:
+        assert info.link_type(res) in [
+            "L-PEPTIDE LINKING", "PEPTIDE LINKING",
+            "DNA LINKING", "RNA LINKING"
+        ]
     # Test the remaining categories
     for category in [
         c for c in a1.get_annotation_categories() if c != "hetero"
@@ -138,6 +135,50 @@ def test_pdbx_consistency(path, model):
                a2.get_annotation(category).tolist()
     assert a1.coord.flatten().tolist() == \
            approx(a2.coord.flatten().tolist(), abs=1e-3)
+
+
+@pytest.mark.parametrize(
+    "path, model",
+    itertools.product(
+        glob.glob(join(data_dir("structure"), "*.mmtf")),
+        [None, 1]
+    )
+)
+def test_pdbx_consistency_assembly(path, model):
+    """
+    Check whether :func:`get_assembly()` gives the same result for the
+    PDBx/mmCIF and MMTF reader.
+    """
+    mmtf_file = mmtf.MMTFFile.read(path)
+    try:
+        test_assembly = mmtf.get_assembly(mmtf_file, model=model)
+    except biotite.InvalidFileError:
+        if model is None:
+            # The file cannot be parsed into an AtomArrayStack,
+            # as the models contain different numbers of atoms
+            # -> skip this test case
+            return
+        else:
+            raise
+    except NotImplementedError:
+        pytest.skip(
+            "The limitation of the function does not support this structure"
+        )
+    
+    cif_path = splitext(path)[0] + ".cif"
+    pdbx_file = pdbx.PDBxFile.read(cif_path)
+    ref_assembly = pdbx.get_assembly(pdbx_file, model=model)
+
+    # MMTF might assign some residues, that PDBx assigns as 'hetero',
+    # as 'non-hetero' if they are RNA/DNA or peptide linking
+    # -> skip 'hetero' category
+    for category in [
+        c for c in ref_assembly.get_annotation_categories() if c != "hetero"
+    ]:
+        assert test_assembly.get_annotation(category).tolist() == \
+                ref_assembly.get_annotation(category).tolist()
+    assert test_assembly.coord.flatten().tolist() == \
+           approx(ref_assembly.coord.flatten().tolist(), abs=1e-3)
 
 
 def test_extra_fields():
