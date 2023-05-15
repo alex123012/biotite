@@ -74,8 +74,8 @@ class BondType(IntEnum):
         """
         Remove aromaticity from the bond type.
         
-        :attr:`BondType.AROMATIC_<ORDER>` is converted into
-        :attr:`BondType.<ORDER>`.
+        :attr:`BondType.AROMATIC_{ORDER}` is converted into
+        :attr:`BondType.{ORDER}`.
 
         Returns
         -------
@@ -157,6 +157,8 @@ class BondList(Copyable):
     sanitized: Redundant bonds are removed, and each bond entry is
     sorted so that the lower one of the two atom indices is in the first
     column.
+    If a bond appears multiple times with different bond types, the
+    first bond takes precedence.
     
     Examples
     --------
@@ -436,8 +438,8 @@ class BondList(Copyable):
         """
         Remove aromaticity from the bond types.
         
-        :attr:`BondType.AROMATIC_<ORDER>` is converted into
-        :attr:`BondType.<ORDER>`.
+        :attr:`BondType.AROMATIC_{ORDER}` is converted into
+        :attr:`BondType.{ORDER}`.
 
         Examples
         --------
@@ -929,12 +931,14 @@ class BondList(Copyable):
         """
         merge(bond_list)
         
-        Merge this instance with another :class:`BondList` into a new
+        Merge another :class:`BondList` with this instance into a new
         object.
+        If a bond appears in both :class:`BondList`'s, the
+        :class:`BondType` from the given `bond_list` takes precedence.
 
         The internal :class:`ndarray` instances containg the bonds are
-        simply concatenated and the new atom count is the maximum atom
-        count of the merged bond lists.
+        simply concatenated and the new atom count is the maximum of
+        both bond lists.
 
         Parameters
         ----------
@@ -956,7 +960,7 @@ class BondList(Copyable):
 
         >>> bond_list1 = BondList(3, np.array([(0,1),(1,2)]))
         >>> bond_list2 = BondList(5, np.array([(2,3),(3,4)]))
-        >>> merged_list = bond_list1.merge(bond_list2)
+        >>> merged_list = bond_list2.merge(bond_list1)
         >>> print(merged_list.get_atom_count())
         5
         >>> print(merged_list)
@@ -964,12 +968,30 @@ class BondList(Copyable):
          [1 2 0]
          [2 3 0]
          [3 4 0]]
+        
+        The BondList given as parameter takes precedence:
+
+        # Specifiy bond type to see where a bond is taken from
+        >>> bond_list1 = BondList(4, np.array([
+        ...     (0, 1, BondType.SINGLE),
+        ...     (1, 2, BondType.SINGLE)
+        ... ]))
+        >>> bond_list2 = BondList(4, np.array([
+        ...     (1, 2, BondType.DOUBLE),    # This one is a duplicate
+        ...     (2, 3, BondType.DOUBLE)
+        ... ]))
+        >>> merged_list = bond_list2.merge(bond_list1)
+        >>> print(merged_list)
+        [[0 1 1]
+         [1 2 1]
+         [2 3 2]]
         """
         return BondList( 
             max(self._atom_count, bond_list._atom_count), 
-            np.concatenate([self.as_array(), 
-                            bond_list.as_array()], 
-                            axis=0) 
+            np.concatenate(
+                [bond_list.as_array(), self.as_array()], 
+                axis=0
+            ) 
         ) 
 
     def __add__(self, bond_list):
@@ -1399,8 +1421,7 @@ def connect_via_distances(atoms, dict distance_range=None, atom_mask=None,
         still taken from the default dictionary.
         The default bond distances are taken from :footcite:`Allen1987`.
     atom_mask : ndarray, dtype=bool, shape=(n,), optional
-        If set, only the atoms, where this mask is ``True``, are
-        connected.
+        DEPRECATED: This option has no effect.
     inter_residue : bool, optional
         If true, connections between consecutive amino acids and
         nucleotides are also added.
@@ -1439,7 +1460,6 @@ def connect_via_distances(atoms, dict distance_range=None, atom_mask=None,
     from .residues import get_residue_starts
 
     cdef list bonds = []
-    cdef uint8[:] mask = _prepare_mask(atom_mask, atoms.array_length())
     cdef int i
     cdef int curr_start_i, next_start_i
     cdef np.ndarray coord = atoms.coord
@@ -1491,9 +1511,6 @@ def connect_via_distances(atoms, dict distance_range=None, atom_mask=None,
         )
         for atom_index1 in range(len(elements_in_res)):
             for atom_index2 in range(atom_index1):
-                if not mask[atom_index1] or not mask[atom_index2]:
-                    # Do not connect atoms that were filtered out
-                    continue
                 dist_range = dist_ranges.get((
                     elements_in_res[atom_index1],
                     elements_in_res[atom_index2]
@@ -1543,8 +1560,7 @@ def connect_via_residue_names(atoms, atom_mask=None, bint inter_residue=True):
     atoms : AtomArray, shape=(n,) or AtomArrayStack, shape=(m,n)
         The structure to create the :class:`BondList` for.
     atom_mask : ndarray, dtype=bool, shape=(n,), optional
-        If set, only the atoms, where this mask is ``True``, are
-        connected.
+        DEPRECATED: This option has no effect.
     inter_residue : bool, optional
         If true, connections between consecutive amino acids and
         nucleotides are also added.
@@ -1574,7 +1590,6 @@ def connect_via_residue_names(atoms, atom_mask=None, bint inter_residue=True):
     from .residues import get_residue_starts
 
     cdef list bonds = []
-    cdef uint8[:] mask = _prepare_mask(atom_mask, atoms.array_length())
     cdef int i
     cdef int curr_start_i, next_start_i
     cdef np.ndarray atom_names = atoms.atom_name
@@ -1620,20 +1635,6 @@ def connect_via_residue_names(atoms, atom_mask=None, bint inter_residue=True):
         return bond_list.merge(inter_bonds)
     else:
         return bond_list
-
-
-def _prepare_mask(atom_mask, array_length):
-    # Prepare masked atoms
-    cdef uint8[:] mask
-    if atom_mask is not None:
-        if len(atom_mask) != array_length:
-            raise IndexError(
-                f"Atom mask has length {len(atom_mask)}, "
-                f"but there are {array_length} atoms"
-            )
-        return np.frombuffer(atom_mask, dtype=np.uint8)
-    else:
-        return np.ones(array_length, dtype=np.uint8)
 
 
 
@@ -1688,7 +1689,7 @@ def _connect_inter_residue(atoms, residue_starts):
         
         # Get link type for this residue from RCSB components.cif
         curr_link = link_type(res_names[curr_start_i])
-        next_link = link_type(res_names[curr_start_i+1])
+        next_link = link_type(res_names[next_start_i])
         
         if curr_link in _PEPTIDE_LINKS and next_link in _PEPTIDE_LINKS:
             curr_connect_atom_name = "C"
